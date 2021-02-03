@@ -1,24 +1,23 @@
 #include<stdio.h>
 #include<stdint.h>
-#define ITERATIONS 300000
+#include"src/slab.h"
 
 #define runTest(test) do {char *message = test(); test_run++; \
 			if (message) return (char*)message; } while(0)
 
 int test_run = 0;
 
-static uint8_t* test_cache_create(){
-	kmem_cache_t cp = kmem_cache_create("test", 12, 0, 0, 0);
-	kmem_cache_destroy(cp);
+static char* test_cache_create(){
+	uint8_t *ptr = slubAlloc(10);
 	return 0;
 }
 
-static uint8_t* testAll(){
+static char* testAll(){
 	runTest(test_cache_create);
 	return 0;
 }
 
 int main(void){
-	uint8_t result = test_all();
+	char *result = testAll();
 	return 0;
 }
