@@ -75,38 +75,26 @@ static uint8_t slabInit(){
 	
 	settings *s = cashe->stn;
 	int ret;
-	printf("%d", s->maxbytes);
 	
 	void *ptr = mmap (0, s->maxbytes,PROT_READ | PROT_WRITE,MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
     	if(ptr == MAP_FAILED){
 		printf("Mapping Failed\n");
 		exit(1);
     	}
-	/*
-	if ((ret = posix_memalign(&ptr, 0, s->maxbytes)) != 0) {
-		fprintf(stderr, "Failed to get aligned memory chunk: %d\n", ret);
-		return 1;
-	}
-
-	if ((ret = madvise(ptr, s->maxbytes, MADV_HUGEPAGE)) < 0) {
-		fprintf(stderr, "Failed to set transparent hugepage hint: %d\n", ret);
-		free(ptr);
-		return 1;
-	}
-	*/
 	cashe->base = cashe->memCurPos = ptr;
 	cashe->memLimit = cashe->memAvail = s->maxbytes;
 	
 	slabclass_t *slabs = cashe->slabs;
 	uint32_t size = sizeof(item) + s->minChunkSize;
-	memset(&slabs, 0, sizeof slabs);
+	memset(slabs, 0, sizeof *slabs);
 	for (uint32_t i = 1; i<MAX_NUMBER_OF_SLAB_CLASSES-1; i++, size *= s->factor){
+		printf("%d size: %d; perslab: %ld;\n", i, size, s->slabPageSize / size);
 		slabs[i].size = size;
 		slabs[i].perslab = s->slabPageSize / size;
 	}
+	//printf("Size: %d\n", slabs[MAX_NUMBER_OF_SLAB_CLASSES-2].size/1024);
     	slabs[MAX_NUMBER_OF_SLAB_CLASSES-1].size = s->maxChunkSize;
     	slabs[MAX_NUMBER_OF_SLAB_CLASSES-1].perslab = s->slabPageSize / s->maxChunkSize;
-    	
 	return 0;
 }
 
@@ -120,7 +108,7 @@ static settings* settingsInit(){
 	s->slabPageSize = 1024 * 1024;         // 1024*1024
 	s->minChunkSize = 48;		// 48
 	s->maxChunkSize = s->slabPageSize / 2;		// settings.slabPageSize / 2;
-	s->factor = 1.25;
+	s->factor = 1.1;
 	return s;
 	//TODO: s init by values;
 }
