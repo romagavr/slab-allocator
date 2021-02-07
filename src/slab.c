@@ -4,16 +4,16 @@
 #include"slab.h"
 
 typedef struct {
-    uint32_t size;      /* sizes of items */
-    uint32_t perslab;   /* how many items per slab */
+    uint32_t size;      /* size of chunk */
 
-    void *slots;           /* list of item ptrs */
-    unsigned int sl_curr;   /* total free items in list */
+    void *chunksList;           /* list of item ptrs */
+    uint32_t freeChunks;   /* total free items in list */
+    uint32_t chunksCount;   /* how many items per slab */
 
-    unsigned int slabs;     /* how many slabs were allocated for this class */
 
-    void **slab_list;       /* array of slab pointers */
-    unsigned int list_size; /* size of prev array */
+    void **slabList;       /* array of slab pointers */
+    uint32_t slabsCount;     /* how many slabs were allocated for this class */
+    unsigned int slabListSize; /* size of prev array */
 } slabclass_t;
 
 typedef struct {
@@ -51,50 +51,50 @@ typedef struct _stritem {
 } item;
 
 
-static kmemCashe *cashe = 0;
+static kmemCashe *cache = 0;
 static settings *preSet = 0;
 
 static uint8_t slabInit();
 static settings* settingsInit();
 
 static uint8_t slabInit(){
-	cashe = calloc(1, sizeof(kmemCashe));
-	if (!cashe) return 1;
-	cashe->slabs = calloc(1, sizeof(slabclass_t) * MAX_NUMBER_OF_SLAB_CLASSES);
-	if (!cashe->slabs) {
-		free(cashe);
+	cache = calloc(1, sizeof(kmemCashe));
+	if (!cache) return 1;
+	cache->slabs = calloc(1, sizeof(slabclass_t) * MAX_NUMBER_OF_SLAB_CLASSES);
+	if (!cache->slabs) {
+		free(cache);
 		return 1;
 	}
-	cashe->stn = calloc(1, sizeof(settings));
-	if (!cashe->stn) {
-		free(cashe);
-		free(cashe->slabs);
+	cache->stn = calloc(1, sizeof(settings));
+	if (!cache->stn) {
+		free(cache);
+		free(cache->slabs);
 		return 1;
 	}
-	cashe->stn = settingsInit();
+	cache->stn = settingsInit();
 	
-	settings *s = cashe->stn;
+	settings *s = cache->stn;
 	int ret;
 	
 	void *ptr = mmap (0, s->maxbytes,PROT_READ | PROT_WRITE,MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
-    	if(ptr == MAP_FAILED){
+   	if(ptr == MAP_FAILED){
 		printf("Mapping Failed\n");
 		exit(1);
-    	}
-	cashe->base = cashe->memCurPos = ptr;
-	cashe->memLimit = cashe->memAvail = s->maxbytes;
+    }
+	cache->base = cache->memCurPos = ptr;
+	cache->memLimit = cache->memAvail = s->maxbytes;
 	
-	slabclass_t *slabs = cashe->slabs;
+	slabclass_t *slabs = cache->slabs;
 	uint32_t size = sizeof(item) + s->minChunkSize;
 	memset(slabs, 0, sizeof *slabs);
 	for (uint32_t i = 1; i<MAX_NUMBER_OF_SLAB_CLASSES-1; i++, size *= s->factor){
-		printf("%d size: %d; perslab: %ld;\n", i, size, s->slabPageSize / size);
+		printf("%d size: %d; chunksCount: %ld;\n", i, size, s->slabPageSize / size);
 		slabs[i].size = size;
-		slabs[i].perslab = s->slabPageSize / size;
+		slabs[i].chunksCount = s->slabPageSize / size;
 	}
 	//printf("Size: %d\n", slabs[MAX_NUMBER_OF_SLAB_CLASSES-2].size/1024);
-    	slabs[MAX_NUMBER_OF_SLAB_CLASSES-1].size = s->maxChunkSize;
-    	slabs[MAX_NUMBER_OF_SLAB_CLASSES-1].perslab = s->slabPageSize / s->maxChunkSize;
+	slabs[MAX_NUMBER_OF_SLAB_CLASSES-1].size = s->maxChunkSize;
+	slabs[MAX_NUMBER_OF_SLAB_CLASSES-1].chunksCount = s->slabPageSize / s->maxChunkSize;
 	return 0;
 }
 
@@ -120,84 +120,70 @@ uint8_t preSetInit(settings *s){
 }
 
 static uint8_t growList(uint32_t id){
-	slabclass_t *sl = &(cashe->slabs[id]);
-	size_t new_size =  (sl->list_size != 0) ? sl->list_size * 2 : 16;
-	void *new_list = realloc(sl->slab_list, new_size * sizeof(void *));
-	if (new_list == 0) return 1;
-	sl->list_size = new_size;
-	sl->slab_list = new_list;
+	slabclass_t *sl = &(cache->slabs[id]);
+	if (sl->slabsCount == sl->slabListSize) {
+		size_t size =  (sl->slabListSize != 0) ? sl->slabListSize * 2 : 16;
+		void *list = realloc(sl->slabList, size * sizeof(void *));
+		if (list == 0) return 1;
+		sl->slabListSize = size;
+		sl->slabList = list;
+	}
 	return 0;
 }
 
 static void* getSlubPage(size_t size) {
-	if (size > cashe->memAvail) return 0;
+	if (size > cache->memAvail) return 0;
 	if (size % CHUNK_ALIGN_BYTES)
 	    size += CHUNK_ALIGN_BYTES - (size % CHUNK_ALIGN_BYTES);
 	    
-	void* ret = cashe->memCurPos;
-	cashe->memCurPos = ((char*)cashe->memCurPos) + size;
-	cashe->memAvail = (size < cashe->memAvail) ? cashe->memAvail - size : 0;
+	void* ret = cache->memCurPos;
+	cache->memCurPos = ((char*)cache->memCurPos) + size;
+	cache->memAvail = (size < cache->memAvail) ? cache->memAvail - size : 0;
 	return ret;
 }
 
 void* slubAlloc(size_t size) {
 	uint8_t ret = 0;
-	if (!cashe && (ret = slabInit())) {
+	if (!cache && (ret = slabInit())) {
 		return 0;
 	};
 	uint32_t id = 0;
-	while (cashe->slabs[++id].size < size){};
-
-	// create linked list of slab
-	growList(id);
-	void *ptr = 0;
-	if ((ptr = getSlubPage(cashe->stn->slabPageSize)) == 0) {
-		return 0;
+	while (cache->slabs[++id].size < size){};
+	slabclass_t *p = &(cache->slabs[id]);
+	item *it = 0;
+	if (p->freeChunks == 0){
+		// create linked list of slab
+		growList(id);
+		void *ptr = 0;
+		if ((ptr = getSlubPage(cache->stn->slabPageSize)) == 0) {
+			return 0;
+		}
+		memset(ptr, 0, cache->stn->slabPageSize);
+		for (uint32_t j = 0; j < p->chunksCount; j++, ptr += p->size) {
+			it = (item *)ptr;
+			it->it_flags = ITEM_SLABBED;
+			it->slabs_clsid = id;
+			it->prev = 0;
+			it->next = p->chunksList;
+			if (it->next) it->next->prev = it;
+			p->chunksList = it;
+			p->freeChunks++;
+		}
+		p->slabList[p->slabsCount++] = ptr;
 	}
-	memset(ptr, 0, cashe->stn->slabPageSize);
-	slabclass_t *p = &(cashe->slabs[id]);
-    	for (uint32_t j = 0; j < p->perslab; j++, ptr += p->size) {
-    		item *it = (item *)ptr;
-        	it->it_flags = ITEM_SLABBED;
-        	it->slabs_clsid = id;
-        	it->prev = 0;
-        	it->next = p->slots;
-        	if (it->next) it->next->prev = it;
-        	p->slots = it;
-        	p->sl_curr++;
-    	}
-    	p->slab_list[p->slabs++] = ptr;
-    	if (p->sl_curr == 0) return 0;
-    
-        item *it = (item *)p->slots;
-	p->slots = it->next;
+
+	it = (item *)p->chunksList;
+	p->chunksList = it->next;
 	if (it->next) it->next->prev = 0;
 	it->it_flags &= ~ITEM_SLABBED;
 	it->refcount = 1;
-	p->sl_curr--;
+	p->freeChunks--;
 	
-    	return (void *)it;
-
-	/*
-	slabclass_t *s = &(cashe->slabs[BANK_OF_FREE_SLABS]);
-	if (s->slabs == 0){
-		void *ptr =0;
-		if ((ptr = getSlubPage(cashe->stn->slabPageSize)) == 0) {
-			return 0;
-		}
-		growList(BANK_OF_FREE_SLABS);
-		memset(ptr, 0, size);
-		s->slab_list[s->slabs++] = ptr;
-	}
-        
-        // get_page_from_global_pool(void)
-    	uint8_t *res = s->slab_list[s->slabs - 1];
-    	s->slabs--;
-    	*/
+    return (void *)it;
 }
 
 uint8_t slubFree(void *object) {
-	if (!cashe) {
+	if (!cache) {
 		return 0;
 	};
 }
