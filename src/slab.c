@@ -3,41 +3,20 @@
 #include <sys/mman.h>
 #include"slab.h"
 
-typedef struct {
-    uint32_t size;      /* size of chunk */
-
-    void *chunksList;           /* list of item ptrs */
-    uint32_t freeChunks;   /* total free items in list */
-    uint32_t chunksCount;   /* how many items per slab */
-
-
-    void **slabList;       /* array of slab pointers */
-    uint32_t slabsCount;     /* how many slabs were allocated for this class */
-    unsigned int slabListSize; /* size of prev array */
-} slabclass_t;
-
-typedef struct {
-	slabclass_t *slabs;
-	settings *stn;
-	void *base; // huge memory chunk
-	void *memCurPos; // current position in huge memory chunk
-	size_t memLimit; //Total size of allocated mem using mmap
-	size_t memAvail; //Available size of allocated mem using mmap
-} kmemCashe;
+#define GET_ITEM(p) ((item *)((uint8_t *)p - sizeof(item)))
+#define SLAB_CACHE 0
 
 typedef struct _stritem {
     /* Protected by LRU locks */
     struct _stritem *next;
     struct _stritem *prev;
     /* Rest are protected by an item lock */
-    struct _stritem *h_next;    /* hash chain next */
     //rel_time_t      time;       /* least recent access */
     //rel_time_t      exptime;    /* expire time */
     int             nbytes;     /* size of data */
     unsigned short  refcount;
     uint16_t        it_flags;   /* ITEM_* above */
-    uint8_t         slabs_clsid;/* which slab class we're in */
-    uint8_t         nkey;       /* key length, w/terminating null and padding */
+    uint8_t         slabId;/* which slab class we're in */
     /* this odd type prevents type-punning issues when we do
      * the little shuffle to save space when not using CAS. */
     union {
@@ -49,6 +28,33 @@ typedef struct _stritem {
     /* then " flags length\r\n" (no terminating null) */
     /* then data with terminating \r\n (no terminating null; it's binary!) */
 } item;
+
+typedef struct {
+    uint32_t size;      /* size of returned memory */
+	uint32_t sizeOfChunk;  /* size of chunk */
+
+    void *chunksList;           /* list of item ptrs */
+    uint32_t chunksCount;   /* how many items per slab */
+    uint32_t freeChunks;   /* total free items in list */
+
+    void **slabList;       /* array of slab pointers */
+    uint32_t slabsCount;     /* how many slabs were allocated for this class */
+    unsigned int slabListSize; /* size of prev array */
+
+	item *freeList;
+	item *usedList;
+	item *cachedList;
+} slabclass_t;
+
+typedef struct {
+	slabclass_t *slabs;
+	settings *stn;
+	void *base; // huge memory chunk
+	void *memCurPos; // current position in huge memory chunk
+	size_t memLimit; //Total size of allocated mem using mmap
+	size_t memAvail; //Available size of allocated mem using mmap
+} kmemCashe;
+
 
 
 static kmemCashe *cache = 0;
@@ -85,16 +91,20 @@ static uint8_t slabInit(){
 	cache->memLimit = cache->memAvail = s->maxbytes;
 	
 	slabclass_t *slabs = cache->slabs;
-	uint32_t size = sizeof(item) + s->minChunkSize;
+	uint32_t size = s->minChunkSize;
+	uint32_t sizeItem = sizeof(item);
 	memset(slabs, 0, sizeof *slabs);
 	for (uint32_t i = 1; i<MAX_NUMBER_OF_SLAB_CLASSES-1; i++, size *= s->factor){
-		printf("%d size: %d; chunksCount: %ld;\n", i, size, s->slabPageSize / size);
+		//printf("%d size: %d; sizeOfChunk: %d; chunksCount: %ld;\n", i, size, size+sizeItem, s->slabPageSize / (size+sizeItem));
 		slabs[i].size = size;
-		slabs[i].chunksCount = s->slabPageSize / size;
+		slabs[i].sizeOfChunk = size + sizeItem;
+		slabs[i].chunksCount = s->slabPageSize / (size + sizeItem);
+		slabs[i].slabsCount++;
 	}
 	//printf("Size: %d\n", slabs[MAX_NUMBER_OF_SLAB_CLASSES-2].size/1024);
 	slabs[MAX_NUMBER_OF_SLAB_CLASSES-1].size = s->maxChunkSize;
-	slabs[MAX_NUMBER_OF_SLAB_CLASSES-1].chunksCount = s->slabPageSize / s->maxChunkSize;
+	slabs[MAX_NUMBER_OF_SLAB_CLASSES-1].sizeOfChunk = s->maxChunkSize + sizeItem;
+	slabs[MAX_NUMBER_OF_SLAB_CLASSES-1].chunksCount = s->slabPageSize / (s->maxChunkSize + sizeItem);
 	return 0;
 }
 
@@ -119,18 +129,6 @@ uint8_t preSetInit(settings *s){
 	return 1;
 }
 
-static uint8_t growList(uint32_t id){
-	slabclass_t *sl = &(cache->slabs[id]);
-	if (sl->slabsCount == sl->slabListSize) {
-		size_t size =  (sl->slabListSize != 0) ? sl->slabListSize * 2 : 16;
-		void *list = realloc(sl->slabList, size * sizeof(void *));
-		if (list == 0) return 1;
-		sl->slabListSize = size;
-		sl->slabList = list;
-	}
-	return 0;
-}
-
 static void* getSlubPage(size_t size) {
 	if (size > cache->memAvail) return 0;
 	if (size % CHUNK_ALIGN_BYTES)
@@ -142,6 +140,26 @@ static void* getSlubPage(size_t size) {
 	return ret;
 }
 
+static void addToList(item *it, item **list) {
+	if (*list) {
+		it->next = *list;
+		it->prev = (*list)->prev;
+		(*list)->prev = it;
+	} else {
+		*list = it;
+		printf("List - %p\n", *list);
+		(*list)->prev = (*list)->next = *list;
+		printf("Add to List prev %p\n", it->prev);
+		printf("Add to List next %p\n", it->next);
+	}
+}
+
+void* slubAllocNamed(char *name, size_t size, int align, 
+                  	void (*constructor)(void *, size_t),
+                  	void (*destructor)(void *, size_t)) {
+
+}
+
 void* slubAlloc(size_t size) {
 	uint8_t ret = 0;
 	if (!cache && (ret = slabInit())) {
@@ -151,39 +169,107 @@ void* slubAlloc(size_t size) {
 	while (cache->slabs[++id].size < size){};
 	slabclass_t *p = &(cache->slabs[id]);
 	item *it = 0;
-	if (p->freeChunks == 0){
-		// create linked list of slab
-		growList(id);
-		void *ptr = 0;
-		if ((ptr = getSlubPage(cache->stn->slabPageSize)) == 0) {
-			return 0;
+
+	printf("Slab Id %d\n", id);
+	// find in cachedList	
+	if (p->cachedList) {
+		printf("Searching in cached List\n");
+		it = p->cachedList;
+		if (it->next == it) {
+			p->cachedList = 0;
+		} else {
+			p->cachedList = p->cachedList->next;
+			p->cachedList->prev = it->prev;
 		}
-		memset(ptr, 0, cache->stn->slabPageSize);
-		for (uint32_t j = 0; j < p->chunksCount; j++, ptr += p->size) {
-			it = (item *)ptr;
-			it->it_flags = ITEM_SLABBED;
-			it->slabs_clsid = id;
-			it->prev = 0;
-			it->next = p->chunksList;
-			if (it->next) it->next->prev = it;
-			p->chunksList = it;
-			p->freeChunks++;
+	} else {
+		printf("Searching in free List\n");
+		// cachedList is empty -> search in freeList
+		if (!p->freeList) {
+			//freeList is empty -> mmap page -> create freeList
+			void *ptr = 0;
+			if ((ptr = getSlubPage(cache->stn->slabPageSize)) == 0) {
+				return 0;
+			}
+			memset(ptr, 0, cache->stn->slabPageSize);
+			for (uint32_t j = 0; j < p->chunksCount; j++, ptr += p->sizeOfChunk) {
+				it = (item *)ptr;
+				it->it_flags = ITEM_FREE;
+				it->slabId = id;
+				it->next = p->freeList;
+				if (it->next) {
+					it->prev = it->next->prev;
+					it->next->prev = it;
+				} else it->prev = it;
+				p->freeList = it;
+			}
 		}
-		p->slabList[p->slabsCount++] = ptr;
+		// remove from free List
+		it = (item *)p->freeList;
+		if (it->next == it) {
+			p->freeList = 0;
+		} else {
+			p->freeList = it->next;
+			p->freeList->prev = it->prev;
+		}
 	}
 
-	it = (item *)p->chunksList;
-	p->chunksList = it->next;
-	if (it->next) it->next->prev = 0;
-	it->it_flags &= ~ITEM_SLABBED;
+	// add to used List
+	addToList(it, &p->usedList);
+	it->it_flags &= ~ITEM_USED;
 	it->refcount = 1;
-	p->freeChunks--;
-	
-    return (void *)it;
+/*
+	if (uList) {
+		it->next = uList;
+		it->prev = uList->prev;
+		uList->prev = it;
+	} else {
+		uList = it;
+		uList->prev = uList->next = uList;
+	}
+	*/
+	//uint8_t *ret = (void *)((uint8_t*)it + p->size - p->sizeOfChunk);
+	/*
+	uint8_t *rett = (uint8_t*)it + p->sizeOfChunk - p->size;
+	printf("\n%d\n", p->sizeOfChunk - p->size);
+	printf("\n%d\n", p->sizeOfChunk);
+	printf("\n%p\n", ((uint8_t*)it ));
+	printf("\n%p\n", rett);
+	printf("\n%hu\n", ((item *)((uint8_t *)rett - sizeof(item)))->refcount);
+	*/
+	/*
+	uint8_t *ret2 = rett;
+	uint8_t *rettt = rett;
+	for (uint32_t i=0; i<p->size; i++){
+		*rett = 21;
+		rett++;
+	}
+	for (uint32_t i=0; i<p->size; i++){
+		printf("%hhx ", *ret2);
+		ret2++;
+	}
+	printf("\n%p\n", (uint8_t*)it);
+	printf("\n%p\n", rettt);
+	*/
+	//printf("\n%hu\n", ((item *)((uint8_t *)rettt - sizeof(item)))->refcount);
+	printf("\n%p\n", (void *)((uint8_t*)it + sizeof(item)));
+    return (void *)((uint8_t*)it + sizeof(item));
 }
 
 uint8_t slubFree(void *object) {
 	if (!cache) {
 		return 0;
 	};
+	item *it = GET_ITEM(object);
+
+	// remove from usedList
+	it->prev->next = it->next;
+	it->next->prev = it->prev;
+
+	//move to cachedList
+	item *cList = cache->slabs[it->slabId].cachedList;
+	printf("Slab Id %d\n", it->slabId);
+	addToList(it, &(cache->slabs[it->slabId].cachedList));
+	it->it_flags &= ~ITEM_CACHED;
+	it->refcount--;
+	printf("\nFreed\n");
 }

@@ -12,7 +12,9 @@
 
 //Flags
 /* temp */
-#define ITEM_SLABBED 4
+#define ITEM_CACHED 2
+#define ITEM_FREE 4
+#define ITEM_USED 8
 
 /* Item was fetched at least once in its lifetime */
 #define ITEM_FETCHED 8
